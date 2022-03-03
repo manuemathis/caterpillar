@@ -1,0 +1,811 @@
+/* ****************************************************************************
+ *                           _______________________
+ *                           \| Caterpillar  ROBOT SYSTEM |/
+ *                            \_-_-_-_-_-_-_-_-_-_/         
+ * ----------------------------------------------------------------------------
+ * ------------------- [c]2010 - AREXX ENGINEERING ---------------------
+ * -------------------------- http://www.arexx.com/ ---------------------------
+ * ****************************************************************************
+ * File: CaterpillarBaseLib.c
+ * Version: 1.0
++
+ * Target: Caterpillar - ATMEGA16 @16.00MHz
+ * Author(s): Huy Nguyen 
+ 			  Hein Wielink
+ * ****************************************************************************
+ * Description:
+ *
+ * This is the Caterpillar Library - it contains the following functions:
+ * - Processor initialisation
+ * - LED Control
+ * - Beeper control
+ * - A/D Convertor (Battery Voltage Head/tail sensors )
+ * - Servo Control 
+ * - Timing functions 
+ *
+ * PLEASE ALSO READ THE CATERPILLAR MANUAL! THERE YOU WILL FIND EXAMPLE
+ * CODE AND SOME FURTHER EXPLANATIONS!
+ *
+ * In other parts of this library CaterpillarUart.c, 
+ * you can find UART communication.
+ *
+ * -----
+ * Hint: You should better leave all this as it is if you just started with
+ * C programming, but it is a very good idea to read the comments and review 
+ * the code, it will help you to understand C programming for AVR better!
+ * -----
+ *
+ * For the experienced users: 
+ * This code works OK, but it is not optimal! There is a lot potential for 
+ * tuning! 
+ * Well, this leaves some tasks for you and this is what makes most 
+ * fun: To improve the excisting!  
+ *
+ * Of course you are free to add new functions and improvements to this
+ * library and make them available to the public on the Internet e.g. on
+ * our Forum!
+ * Please use the changelog at the end of this file to document your
+ * changes! And add your name to any new function or modification you added! 
+ * E.g. a "modified by <name> at <date>" is always a good idea to show 
+ * other users where and WHAT you changed in the source code!
+ *
+ * It is a good idea to make your own includeable libraries instead of
+ * changing this library - of course only if this is possible.
+ *
+ * Or create your own complete library with all specific functions you need.
+ * This code is GPL'd - s. license at the end of this file!
+ *
+ * ****************************************************************************
+ * CHANGELOG AND LICENSING INFORMATION CAN BE FOUND AT THE END OF THIS FILE!
+ * ****************************************************************************
+ */
+
+/*****************************************************************************/
+// Includes:
+
+#include "CaterpillarBaseLib.h"
+
+int servo_Active[] = {false, false,false,false,false, false,false,false};
+int a,i=1,x,BeepSound,Bit=0;
+volatile uint16_t delay_timer;
+volatile uint8_t ms_timer;
+volatile stopwatches_t stopwatches;
+volatile uint8_t feeler_timer;
+
+/*****************************************************************************/
+//Timer Interrupts:
+
+//Timer1 (Servo) 
+ISR(TIMER1_COMPA_vect){
+
+	TCNT1=0x00;
+	i++;
+	} 
+
+//Timer2 (100uS Timer) 
+ISR(TIMER2_COMP_vect){
+	
+		delay_timer++;
+
+		if(ms_timer++ >= 10) { // 10 * 100µs = 1ms
+		// 16bit Stopwatches:
+		if(stopwatches.watches & STOPWATCH1)
+			stopwatches.watch1++;
+		if(stopwatches.watches & STOPWATCH2)
+			stopwatches.watch2++;
+		if(stopwatches.watches & STOPWATCH3)
+			stopwatches.watch3++;
+		if(stopwatches.watches & STOPWATCH4)
+			stopwatches.watch4++;
+		if(stopwatches.watches & STOPWATCH5)
+			stopwatches.watch5++;
+		if(stopwatches.watches & STOPWATCH6)
+			stopwatches.watch6++;
+		if(stopwatches.watches & STOPWATCH7)
+			stopwatches.watch7++;
+		if(stopwatches.watches & STOPWATCH8)
+			stopwatches.watch8++;
+
+		ms_timer=0;
+		}
+
+		// Feeler check timer
+		if(feeler_timer < 52)
+    	feeler_timer++;		
+	
+	}
+
+
+/*****************************************************************************/
+// Interrupt RC5
+
+SIGNAL (INT0_vect)
+{	
+	GICR = (0 << INT0);		// Turn off INT0!
+	RC5_Ready = 1;				// Set RC5 Ready 
+	Bit = 1;
+}	
+
+
+
+// RC5 handler 
+void RC5_Handler(void)
+{	
+
+	for(Bit=1; Bit<9; Bit++)
+	{
+		sleep(16); // one bit time delay
+	}
+		
+	for(Bit=1; Bit<7; Bit++)
+	{
+		sleep(12);
+		RC5_command = (RC5_command << 1) | ((PIND & 0x04) >> 2);
+		sleep(5);
+	}
+}
+
+//After a RC5 Reception, you have to reset the RC5!!!
+void RC5_Reset (void)
+{
+	//CLEAR
+	RC5_Ready = 0;
+	RC5_command = 0;
+		
+	//Delay before start a new detection
+	sleep(50); 
+			
+	// Turn on INT0!
+	GICR |= (1 << INT0);
+}
+
+
+/*****************************************************************************/
+// LEDs:
+
+/**
+ * - Update status LEDs with current value from shadow register.
+ * - Write to shift register (leds) 
+ * Example:
+ *
+ *			statusLEDs.byte=0b101001;
+ *			updateStatusLEDs();
+ *			// RED Led = on
+ *			// LED 4   = on 
+ *			// LED 1   = on 
+ *			
+ *			// Other possibility:
+ *			statusLEDs.LED2=true;
+ *			updateStatusLEDs();
+ *			// This sets LED2 and does not affect any other LED!
+ */
+
+
+void updateStatusLEDs(void)
+{
+	PORTD|= STRB;  
+	SPCR = ( (1<<SPE)|(1<<MSTR) | (1<<SPR1) |(1<<SPR0));
+	SPDR = statusLEDs.byte;			// Write byte to shift register. 
+	while(!(SPSR & (1<<SPIF)));    // Wait for transmission complete 
+	SPCR = ( (0<<SPE)|(1<<MSTR) | (1<<SPR1) |(1<<SPR0));
+	PORTD&= ~STRB;  
+}
+
+
+/*****************************************************************************/
+/**
+ * Set LEDs - this is very handy if you want to set all LEDs.
+ *
+ * Example:
+ *
+ *			setLEDs(0b101001);
+ *			// this clears all LEDs and sets the LEDs 1, 4 and RED		
+ */
+
+
+void SetLeds(unsigned char byte) 
+{ 
+statusLEDs.byte = byte;               //Load byte to Data register 
+updateStatusLEDs();
+} 
+
+/*****************************************************************************
+// Set Power LED on red
+ * Example:
+ *
+ *			PowerLEDred();
+ *			// Power led = RED
+ */
+
+void PowerLEDred(void){
+
+statusLEDs.LED_GREEN = false;  	
+statusLEDs.LED_RED = true;  
+updateStatusLEDs();		
+	
+}
+
+/*****************************************************************************/
+// Set Power LED on green
+void PowerLEDgreen(void){
+	
+statusLEDs.LED_GREEN = true;  	
+statusLEDs.LED_RED = false; 
+updateStatusLEDs(); 		
+	
+}
+
+/*****************************************************************************/
+// Set Power LED on orange
+void PowerLEDorange(void){
+
+statusLEDs.LED_GREEN = true;  	
+statusLEDs.LED_RED = true; 
+updateStatusLEDs(); 	
+
+}
+
+/*****************************************************************************/
+// Set Power LED off
+void PowerLEDoff(void){
+
+statusLEDs.LED_GREEN = false;  	
+statusLEDs.LED_RED = false; 
+updateStatusLEDs(); 	
+
+}
+
+/*****************************************************************************/
+// Set LED on
+void setLED(uint8_t led)
+{
+	switch(led){
+		case 1:	statusLEDs.LED1 = true;
+				break;
+				
+		case 2: statusLEDs.LED2 = true;				
+				break;
+		
+		case 3: statusLEDs.LED3 = true;		
+				break;
+				
+		case 4: statusLEDs.LED4 = true;				
+				break;
+	}
+	
+	updateStatusLEDs(); 
+}
+
+/*****************************************************************************/
+// Set LED off
+void clearLED(uint8_t led)
+{
+	switch(led){
+		case 1: statusLEDs.LED1 = false;				
+				break;
+		
+		case 2: statusLEDs.LED2 = false;
+				break;
+		
+		case 3: statusLEDs.LED3 = false;
+				break;
+		
+		case 4: statusLEDs.LED4 = false;				
+				break;
+		
+	}
+	
+	updateStatusLEDs(); 
+}
+
+
+
+
+/*****************************************************************************/
+/* Delay with the help of timer1.
+ * msleep(1) delays for *about* 1ms! Not exaclty, as we do not use assembly routines
+ * anywhere in this library!
+ *
+ * This is a blocking routine, which means that the processor
+ * will loop in this routine and (except for interrupts) the
+ * normal program flow is stopped!
+ * Thus you should use the Stopwatch functions wherever you can!
+ *
+ * Example:
+ *		msleep(1); // delay 1 * 1ms = 1ms 
+ *		msleep(10); // delay 10 * 1ms = 10ms 
+ *		msleep(100); // delay 100 * 1ms = 100ms 
+ *		// The maximum delay is:
+ *		msleep(65535); // delay 65535 * 1ms = 65535ms = 1 min. 5s   
+ */  
+
+void sleep(uint8_t time)
+{
+	for (delay_timer = 0; delay_timer < time;);
+}
+
+
+void mSleep(uint16_t time)
+{
+	
+	while (time--) sleep(10);
+}
+
+
+/*****************************************************************************/
+
+int getRoll_sensor(void){
+	
+	ADMUX = Roll_setting;
+	mSleep(300);
+
+	if( ADCH >= 0x7D && ADCH <= 0x87 ) //Left
+		return 2;
+	else if ( ADCH >= 0xA0 && ADCH <= 0xB5 ) //Right
+		return 1;  
+	else
+		return 0;
+		
+}
+
+/*****************************************************************************/
+// Measure Ubat 
+
+uint16_t getUbat(void){
+
+
+	int low,high, result;
+
+	ADMUX = Ubat_setting;
+	mSleep(50);	
+
+	while( !(ADCSRA & 0x10));
+	low = ADCL;
+  	high = ADCH ;
+	result = ((high<<8)|low ); 
+	return result;
+
+}
+
+/*****************************************************************************/
+// check if head left is activated. Yes -> return 1, No -> return 0
+int getHeadLeft(void){
+
+	ADMUX = HeadRight_setting;
+	mSleep(10);	
+	if(ADCH > 0x0F)
+		return 1;
+	else
+		return 0;	
+}
+
+/*****************************************************************************/
+// check if head right is activated. Yes -> return 1, No -> return 0
+int getHeadRight(void){
+
+	ADMUX = HeadLeft_setting;
+	mSleep(10);	
+	if(ADCH > 0x0F)
+		return 1;
+	else
+		return 0;	
+}
+
+/*****************************************************************************/
+// check if tail is activated. Yes -> return 1, No -> return 0
+int getTail(void){
+
+	ADMUX = Tail_setting;
+	mSleep(10);	
+	if(ADCH > 0x0F)
+		return 1;
+	else
+		return 0;	
+}	
+	
+// -------------------------------
+// Feelers State changed handler:
+
+void FEELERS_stateChanged_DUMMY(void){}
+static void (*FEELERS_stateChangedHandler)(void) = FEELERS_stateChanged_DUMMY;
+/**
+ * Use this function to set the Feelers state change handler. 
+ * 
+ */
+void FEELERS_setStateChangedHandler(void (*feelerHandler)(void)) 
+{
+	FEELERS_stateChangedHandler = feelerHandler;
+}
+// -------------------------------
+
+uint8_t feeler_left;
+uint8_t feeler_right;
+uint8_t feeler_tail;
+
+/**
+ * If you call this frequently out of the mainloop, the global feeler_left, feeler_right and feeler_tail 
+ * variables are updated automatically every 50ms and can be used everywhere
+ * in your program. It can also call an event handler routine that you
+ * need to register with FEELERS_setStateChangedHandler before.
+ */
+void task_Feelers(void)
+{
+	if(feeler_timer > 50) { // 50ms
+		uint8_t left = getHeadLeft();
+		uint8_t right = getHeadRight();
+		uint8_t tail = getTail();		
+		if(feeler_left != left || feeler_right != right || feeler_tail != tail) {
+			feeler_left = left;
+			feeler_right = right;
+			feeler_tail = tail;			
+			FEELERS_stateChangedHandler();
+		}
+		feeler_timer = 0;
+	}
+}
+	
+
+	
+/*****************************************************************************/
+// Set Beep sound on
+void setBeepsound(void)
+{
+	//Clear OC0 on compare match, set OC0 at BOTTOM,
+	TCCR0 =   (1 << WGM00) | (1 << WGM01) 
+			| (0 << COM00) | (1 << COM01)   
+			| (0 << CS02)  | (1 << CS01) | (0 << CS00);
+}
+
+/*****************************************************************************/
+// Set Beep sound off
+void clearBeepsound(void)
+{	
+	//Normal port operation, OC0 disconnected.
+	TCCR0 =   (1 << WGM00) | (1 << WGM01) 
+			| (0 << COM00) | (0 << COM01)   
+			| (0 << CS02)  | (1 << CS01) | (0 << CS00);
+}
+
+
+/*****************************************************************************/
+// Change Beep Sound
+/* Example:
+
+ *		While(true)
+ *		{
+ *			setBeepsound();
+ *			changeBeepsound(150);
+ *			mSleep(1000);
+ *			changeBeepsound(200);
+ *			mSleep(1000);
+ *			changeBeepsound(255);
+ *			mSleep(1000);
+ *		}
+ */		
+	
+		
+
+void changeBeepsound(int PWMvalue)
+{
+	OCR0=PWMvalue;
+}
+
+
+
+/*****************************************************************************/
+/************************** Servo Control   **********************************/
+/*****************************************************************************/
+
+// Declare storage areas for EEPROM
+	VALUE EEMEM ee_DEFAULT;
+
+// Write default values from servos, to the EEPROM 
+void write_Values_EE (void){
+	// To write EEPROM from SRAM
+	eeprom_write_block((const void *)&DEFAULT,(void *)&ee_DEFAULT, sizeof(DEFAULT));
+}
+
+// Read default values from servos, from the EEPROM 
+void Read_Values_EE (void){
+
+	// To read EEPROM back to SRAM
+	eeprom_read_block((void *)&DEFAULT, (const void*)&ee_DEFAULT, sizeof(DEFAULT));
+	
+	if(DEFAULT.SERVO_0 == -1)  DEFAULT.SERVO_0 = 2800;  
+	if(DEFAULT.SERVO_1 == -1)  DEFAULT.SERVO_1 = 2800;  
+	if(DEFAULT.SERVO_2 == -1)  DEFAULT.SERVO_2 = 2800;  
+	if(DEFAULT.SERVO_3 == -1)  DEFAULT.SERVO_3 = 2800;  
+	if(DEFAULT.SERVO_4 == -1)  DEFAULT.SERVO_4 = 2800;  
+	if(DEFAULT.SERVO_5 == -1)  DEFAULT.SERVO_5 = 2800;  
+	if(DEFAULT.SERVO_6 == -1)  DEFAULT.SERVO_6 = 2800;  
+	if(DEFAULT.SERVO_7 == -1)  DEFAULT.SERVO_7 = 2800;  
+
+	Set_normal_position(); 	
+
+}
+
+
+
+/*****************************************************************************/
+// Set servo motors in normal position
+void Set_normal_position(void){
+	servopos[0]=DEFAULT.SERVO_0;
+	servopos[1]=DEFAULT.SERVO_1;
+	servopos[2]=DEFAULT.SERVO_2;
+	servopos[3]=DEFAULT.SERVO_3;
+	servopos[4]=DEFAULT.SERVO_4;
+	servopos[5]=DEFAULT.SERVO_5;
+	servopos[6]=DEFAULT.SERVO_6;
+	servopos[7]=DEFAULT.SERVO_7;
+}
+
+/*****************************************************************************/
+// Set Pin to control a servomotor
+void set_Pin(int servo){
+
+	switch(servo){
+		case 0:{
+			PORTB ^= (1<<0);
+			break;
+		}
+		case 1:{
+	
+			PORTB ^= (2<<0);
+			break;
+		}
+		case 2:{
+			PORTC ^= (4<<0);
+			break;
+		}
+		case 3:{
+			PORTC ^= (8<<0);
+			break;
+		}
+		case 4:{
+			PORTC ^= (16<<0);
+			break;
+		}
+		case 5:{
+			PORTC ^= (32<<0);
+			break;
+		}
+		case 6:{
+			PORTC ^= (64<<0);
+			break;
+		}
+		case 7:{
+			PORTC ^= (128<<0);
+			break;
+		}
+	}
+
+}
+
+/*****************************************************************************/
+// Caterpillar Move (only one servo)
+void Move(int servo){
+		
+	TIMSK |= (1<<OCIE1A)|(0<<OCIE1B);
+
+	for(x=0; x<9;x++){
+		
+		set_Pin(servo);
+		OCR1A=servopos[servo];
+		
+		while(i<2);
+
+		set_Pin(servo);
+		
+		OCR1A=(40000-(servopos[servo])); // (40000 = 20ms) - servoposition
+		
+		while(i<3);
+			
+		i=1;
+		TCNT1=0x00;	
+	}
+
+	OCR1A=1000;
+	TIMSK |= (0<<OCIE1A)|(0<<OCIE1B);
+	
+}
+
+/*****************************************************************************/
+ /* Caterpillar Move all activated servo's 
+ * Only use this functie for a short time, 
+ * Example: 
+ *		...
+ *		SetServo(2);				//Activate Servo 2
+ *		SetServo(4);				//Activate Servo 4
+ *		SetServo(6);    			//Activate Servo 6
+ *		
+ *		for(int d = 0; d<50; d++)	
+ * 		{
+ * 		MoveAll();
+ * 		}
+ *  	...
+ */
+
+void MoveAll(void){
+	
+
+	TIMSK |= (1<<OCIE1A)|(0<<OCIE1B);
+	int Off_Time = 40000; 
+	
+	for(x=0; x<8;x++){
+		
+		if (servo_Active[x]==true)
+		{
+			set_Pin(x);
+		
+			OCR1A=servopos[x];
+			while(i<2){	
+			}
+				set_Pin(x);
+	
+				i=1;
+				Off_Time-=servopos[x];
+		}
+	}
+		
+		OCR1A=Off_Time;
+		
+		while(i<2){}
+					
+		i=1;
+		TCNT1=0x00;	
+		TIMSK = (1 << OCIE2 | 0<<OCIE1A|0<<OCIE1B);
+
+	
+}
+
+
+void SetServo (int Servo)
+{
+servo_Active[Servo] = true;
+}
+
+
+void ClearServo (int Servo)
+{
+servo_Active[Servo] = false;
+}
+
+/*****************************************************************************/
+// Go to start position
+void Start_position(void){
+
+	Set_normal_position();
+	for(a=0; a<8; a++){
+				Move(a);
+		}
+
+}
+
+/*****************************************************************************/
+// Total init for Caterpillar
+/*
+ * Initialise the Robot Controller - ALWAYS CALL THIS FIRST!
+ * The Processor will not work correctly otherwise.
+ * (If you don't implement your own init routine!)
+ *
+ * Example:
+ *
+ *			int16_t main(void)
+ *			{
+ *				initRobotBase();
+ *
+ *				// ... your application code
+ *
+ *				while(true);
+ *				return 0;
+ *			}
+ *
+ */
+void initRobotBase(void){
+	
+	
+	/*****************************************************************************/
+	portInit();		// Setup port directions and initial values.
+					// THIS IS THE MOST IMPORTANT STEP!
+	
+	/*****************************************************************************/
+	cli();			// Disable global interrupts
+	
+		
+	Read_Values_EE ();		//Read default values for the servos from the EEprom 
+							//And store in SRAM
+	
+	/*****************************************************************************/
+	//InitSPI
+	SPCR = ( (0<<SPE)|(1<<MSTR) | (1<<SPR1) |(1<<SPR0));   // Disable SPI, Master, set clock rate fck/128  
+																
+	
+	/*****************************************************************************/
+	// UART:
+	UBRRH = UBRR_BAUD_LOW >> 8;	// Setup UART: Baudrate is Low Speed
+	UBRRL = (uint8_t) UBRR_BAUD_LOW;
+	UCSRA = 0x00;
+    UCSRC = (1<<URSEL)|(1<<UCSZ1)|(1<<UCSZ0);
+    UCSRB = (1 << TXEN) | (1 << RXEN) | (1 << RXCIE);
+	
+
+	/*****************************************************************************/
+	// setADC
+	// AVCC with external capacitor at AREF pin, ADC2 = Tail
+	ADMUX = (1<<REFS1)|(1<<REFS0)|(0<<ADLAR)|(0<<MUX4)|(0<<MUX3)|(0<<MUX2)|(1<<MUX1)|(0<<MUX0);
+	// ADC Enable, ADC Start Conversion, Auto Trigger Enable, Division Factor 8
+	ADCSRA = (1<<ADEN)|(1<<ADSC)|(1<<ADATE)|(0<<ADPS2)|(1<<ADPS1)|(1<<ADPS0); 
+	// Free Running mode
+	SFIOR = (0<<ADTS2)|(0<<ADTS1)|(0<<ADTS0);
+	ADCSRA |= (1<<ADIF);
+
+	// Interrupt on INT0 pin going low
+	MCUCR = (1 << ISC01);
+
+	// Turn on INT0!
+	GICR |= (1 << INT0);
+
+	//TIMSK = (1 << OCIE0);
+	
+
+	/*****************************************************************************/
+	// Initialize Timer 0 -  PWM Beeper
+	TCCR0 =   (1 << WGM00) | (1 << WGM01) 
+			| (0 << COM00) | (0 << COM01)   
+			| (0 << CS02)  | (1 << CS01) | (0 << CS00);
+			
+	//TIMSK = (0 << OCIE0)|(0<<TOIE0) ;
+	OCR0  = 255;
+
+
+	/*****************************************************************************/
+	// Initialize Timer1 - timer for servo's 
+	// Normal port operation, OC1A
+	TCCR1A = (0<<COM1A1)|(0<<COM1A0)|(0<<COM1B1)|(0<<COM1B0)|(0<<FOC1A)|(0<<FOC1B)|(0<<WGM11)|(0<<WGM10);
+	// 8 prescaler, CTC mode
+	TCCR1B = (1<<WGM13)|(1<<WGM12)|(0<<CS12)|(1<<CS11)|(0<<CS10);
+	
+	ICR1 = 40000; // 20mS
+	OCR1A = 1000; // Default Value (Servo) 
+	
+	/*****************************************************************************/
+	// Initialize Timer 2 -  100µs cycle for Delays/Stopwatches, RC5 reception etc.:
+	TCCR2 =   (0 << WGM20) | (1 << WGM21) 
+			| (0 << COM20) | (0 << COM21) 
+			| (0 << CS22)  | (1 << CS21) | (0 << CS20);
+	OCR2  = 199;
+	
+	
+	/*****************************************************************************/
+	//Enable Compare output Timer 2 
+	TIMSK |= (1 << OCIE2);
+
+	sei();
+}
+
+
+/******************************************************************************
+ * Additional info
+ * ****************************************************************************
+ * Changelog:
+ * - v. 1.0 (initial release) 27.05.2010 by Huy Nguyen 
+ 											Hein Wielink
+ *
+* ****************************************************************************
+ * Bugs, feedback, questions and modifications can be posted on the AREXX Forum
+ * on http://www.arexx.com/forum/ !
+ * Of course you can also write us an e-mail to: info@arexx.nl
+ * AREXX Engineering may publish updates from time to time on AREXX.com!
+ * ****************************************************************************
+ * - LICENSE -
+ * GNU GPL v2 (http://www.gnu.org/licenses/gpl.txt, a local copy can be found
+ * on the Caterpillar CD!)
+ * This program is free software. You can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as published
+ * by the Free Software Foundation.
+ * ****************************************************************************
+ */
+
+/*****************************************************************************/
+// EOF
+
